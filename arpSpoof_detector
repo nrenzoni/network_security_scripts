@@ -5,46 +5,53 @@
 from scapy.all import *
 from random import randint
 import sqlite3
-from datetime import datetime as dt
+import datetime
+
 
 def get_cur_time_as_str():
-    return str(dt.now())
-    
+    return str(datetime.datetime.now())
+
+
 def bool_to_int(bool_val):
-        if bool_val:
-            return 1
-        else:
-            return 0
+    if bool_val:
+        return 1
+    else:
+        return 0
+
 
 def arp_pkts_eq(pkt1, pkt2):
     return pkt1.haslayer(Ether) and pkt1.haslayer(ARP) and pkt2.haslayer(Ether) and pkt2.haslayer(ARP) \
-        and pkt1[Ether].src == pkt2[Ether].src and pkt1[Ether].dst == pkt2[Ether].dst \
-        and pkt1.op == pkt2.op and pkt1.hwsrc == pkt2.hwsrc and pkt1.psrc == pkt2.psrc \
-        and pkt1.hwdst == pkt2.hwdst and pkt1.pdst == pkt2.pdst
-            
+           and pkt1[Ether].src == pkt2[Ether].src and pkt1[Ether].dst == pkt2[Ether].dst \
+           and pkt1.op == pkt2.op and pkt1.hwsrc == pkt2.hwsrc and pkt1.psrc == pkt2.psrc \
+           and pkt1.hwdst == pkt2.hwdst and pkt1.pdst == pkt2.pdst
+
+
 # return True if anomaly exists in pkt of layer 2 src mac and arp layer src mac, False otherwise
-def mac_arp_anomoly(pkt):
+def mac_arp_anomaly(pkt):
     return pkt[Ether].src != pkt[ARP].hwsrc
-            
+
+
 class arpSniffer:
     def __init__(self, iface, pkt_timeout=2, old_threshold=5):
-        self.iface=iface
-        self.old_threshold = old_threshold # in seconds
+        self.iface = iface
+        self.old_threshold = old_threshold  # in seconds
         self.pkt_timeout = pkt_timeout
         self.db = db()
         self.recent_req_pkts = {}
-    
+
     def sniff(self):
-        sniff(iface=self.iface, store=0, prn=self.peak_pkt)
-        
+        sniff(iface=self.iface, store=0, prn=self.peak_pkt, filter='arp')
+
     def peak_pkt(self, pkt):
-        self.process_recent_req_pkts() # ideally, should be called from worker thread; self.recent_req_pkts must be thread safe
-        sniffed_time = dt.now()
-        if mac_arp_anomoly(pkt):
+        self.process_recent_req_pkts()  # ideally, should be called from worker thread; self.recent_req_pkts must be thread safe
+        sniffed_time = datetime.datetime.now()
+        if mac_arp_anomaly(pkt):
             # spoof detected; add mac IP address pair to spoof db
             self.db.add_host_entry_to_db(pkt[Ether].src, pkt[ARP].psrc, spoof_pair=True)
             self.db.log_spoof(pkt[Ether].src, pkt[ARP].psrc, get_cur_time_as_str())
-            self.spoof_alarm('spoofing alert: Ether src MAC: {}, Ether dst MAC: {}, ARP src MAC: {}, ARP src IP: {}'.format(pkt[Ether].src, pkt[Ether].dst, pkt[ARP].hwsrc, pkt[ARP].psrc))
+            self.spoof_alarm(
+                'spoofing alert: Ether src MAC: {}, Ether dst MAC: {}, ARP src MAC: {}, ARP src IP: {}'.format(
+                    pkt[Ether].src, pkt[Ether].dst, pkt[ARP].hwsrc, pkt[ARP].psrc))
             return
         # if MAC IP address pair exists in Host DB, skip spoof detection engine
         if self.known_traffic_filter(pkt):
@@ -57,13 +64,13 @@ class arpSniffer:
         self.db.add_host_entry_to_db(pkt[ARP].hwsrc, pkt[ARP].psrc, spoof_pair=False)
 
     def process_recent_req_pkts(self):
-        now_time = dt.now()
-        for iter_pkt, cur_time in self.recent_req_pkts.items():
-            if now_time - cur_time > self.old_threshold:
+        now_time = datetime.datetime.now()
+        for iter_pkt, iter_pkt_metadata in self.recent_req_pkts.items():
+            if now_time - iter_pkt_metadata['sniffed_time'] > datetime.timedelta(seconds=self.old_threshold):
                 del self.recent_req_pkts[iter_pkt]
-                if not iter_pkt['full_arp_cycle']:
+                if not iter_pkt_metadata['full_arp_cycle']:
                     self.half_arp_request_cycle_detected(iter_pkt)
-    
+
     # pkt received is either ARP request or response
     def spoof_detection_engine(self, pkt, sniffed_time):
         # request ARP. add pkt to list and wait until timer expires or matching response ARP received
@@ -75,7 +82,7 @@ class arpSniffer:
             self.recent_req_pkts[pkt] = {}
             self.recent_req_pkts[pkt]['sniffed_time'] = sniffed_time
             self.recent_req_pkts[pkt]['full_arp_cycle'] = False
-            return False # no spoofing detected
+            return False  # no spoofing detected
         # response ARP
         elif pkt[ARP].op == ARP.is_at:
             # check if is_at packet is response to who_has packet (not a broadcast is_at)
@@ -93,10 +100,10 @@ class arpSniffer:
             return self.half_arp_response_cycle_detected(pkt)
         else:
             raise Exception("unmatched packet in spoof detection engine: " + pkt)
-            
+
     def spoof_alarm(self, msg, *args):
         print(msg)
-    
+
     def full_arp_cycle_detected(self, who_has_pkt, is_at_pkt):
         resp_src_mac = is_at_pkt[ARP].hwsrc
         resp_src_ip = is_at_pkt[ARP].psrc
@@ -105,7 +112,8 @@ class arpSniffer:
             # spoof attack, since different Mac in db for ip, since full_arp_cycle_detected() only called if pkt not in known host db already
             self.db.add_host_entry_to_db(resp_src_mac, resp_src_ip, spoof_pair=True)
             self.db.log_spoof(resp_src_mac, resp_src_ip, get_cur_time_as_str())
-            self.spoof_alarm('spoofing in full ARP cycle: resp src MAC: {}, resp src IP: {}'.format(resp_src_mac, resp_src_ip))
+            self.spoof_alarm(
+                'spoofing in full ARP cycle: resp src MAC: {}, resp src IP: {}'.format(resp_src_mac, resp_src_ip))
             # return True
         if self.send_tcp_syn(resp_src_mac, resp_src_ip):
             self.db.add_host_entry_to_db(resp_src_mac, resp_src_ip, spoof_pair=False)
@@ -114,28 +122,31 @@ class arpSniffer:
     # return True if spoof, False otherwise
     def half_arp_request_cycle_detected(self, pkt):
         req_src_mac = pkt[ARP].hwsrc
-        req_src_ip  = pkt[ARP].psrc
+        req_src_ip = pkt[ARP].psrc
         resp_lst = self.send_arp_req(dst_ip=req_src_ip, dst_mac=req_src_mac)
         if len(resp_lst) == 0:
             # no response, spoofing attack
             self.db.add_host_entry_to_db(req_src_mac, req_src_ip, spoof_pair=True)
             self.db.log_spoof(req_src_mac, req_src_ip, get_cur_time_as_str())
-            self.spoof_alarm('spoofing in ARP half req cycle: req src MAC: {}, req src IP: {}'.format(req_src_mac, req_src_ip))
+            self.spoof_alarm(
+                'spoofing in ARP half req cycle: req src MAC: {}, req src IP: {}'.format(req_src_mac, req_src_ip))
             return True
         # loop over all responses; if valid arp response received with different src mac than pkt's src mac, then spoofing attack from pkt
         for resp in resp_lst:
-            if not mac_arp_anomoly(resp) \
+            if not mac_arp_anomaly(resp) \
                     and pkt[ARP].hwsrc != resp[ARP].hwsrc or pkt[ARP].psrc != resp[ARP].psrc:
                 self.db.add_host_entry_to_db(req_src_mac, req_src_ip, spoof_pair=True)
                 self.db.log_spoof(req_src_mac, req_src_ip, get_cur_time_as_str())
-                self.spoof_alarm('spoofing in ARP half req cycle: req src MAC: {}, req src IP: {}, but got response back of src MAC: {}, src IP: {}'.format(req_src_mac, req_src_mac, resp[ARP].hwsrc, resp[ARP].psrc))
+                self.spoof_alarm(
+                    'spoofing in ARP half req cycle: req src MAC: {}, req src IP: {}, but got response back of src MAC: {}, src IP: {}'.format(
+                        req_src_mac, req_src_mac, resp[ARP].hwsrc, resp[ARP].psrc))
                 return True
         return False
 
     # return True if spoof, False otherwise
     def half_arp_response_cycle_detected(self, pkt):
         resp_src_mac = pkt[ARP].hwsrc
-        resp_src_ip  = pkt[ARP].psrc
+        resp_src_ip = pkt[ARP].psrc
         resp_lst = self.send_arp_req(dst_ip=resp_src_ip, dst_mac=resp_src_mac)
         if len(resp_lst) == 0:
             if self.send_tcp_syn(resp_src_mac, resp_src_ip):
@@ -145,8 +156,7 @@ class arpSniffer:
                 # no response from arp request and from tcp syn == spoofing attack
                 self.db.add_host_entry_to_db(resp_src_mac, resp_src_ip, spoof_pair=True)
                 self.db.log_spoof(resp_src_mac, resp_src_ip, get_cur_time_as_str())
-                self.spoof_alarm("spoofing in ARP half resp cycle: resp src MAC: {}, resp src IP: {}.\n",
-                                 format(resp_src_mac, resp_src_ip))
+                self.spoof_alarm("spoofing in ARP half resp cycle: resp src MAC: {}, resp src IP: {}.\n".format(resp_src_mac, resp_src_ip))
                 return True
         # check that arp response mac matches pkt (the function arg pkt)'s response mac
         for resp in resp_lst:
@@ -176,29 +186,30 @@ class arpSniffer:
             return True
         # what happens if src_mac paired up with different ip in db with spoof_pair=True?
         return False
-    
+
     # detects mac/ip pair as legitimate
     def send_tcp_syn(self, dst_mac, dst_ip, sport=None, dport=None):
         if sport is None:
-            sport = randint(5000,60000)
+            sport = randint(5000, 60000)
         if dport is None:
-            dport = randint(5000,60000)
+            dport = randint(5000, 60000)
         syn_pkt = Ether(dst=dst_mac) / IP(dst=dst_ip) / TCP(sport=sport, dport=dport, flags='S')
         res = srp1(syn_pkt, iface=self.iface, timeout=self.pkt_timeout)
         # response means host exists and using legit ip protocol stack
         if res:
             return True
         return False
-        
+
     def send_arp_req(self, dst_ip, dst_mac=None):
         if dst_mac is None:
             dst_mac = "ff:ff:ff:ff:ff:ff"
         arp_pkt = Ether(dst=dst_mac) / ARP(op='who-has', hwdst=dst_mac, pdst=dst_ip)
         resp_lst, _ = srp(arp_pkt, iface=self.iface, multi=True, timeout=self.pkt_timeout)
         return resp_lst
-        
+
+
 class db:
-    def __init__(self, db_filename='mac_ip_hosts.sqlite3'):
+    def __init__(self, db_filename='arpSpoofDetector.sqlite3'):
         self.db_filename = db_filename
         self.db_hosts = 'hosts'
         self.spoof_log = 'spoofs'
@@ -207,54 +218,62 @@ class db:
         # only creates tables if they don't exist already
         self.create_mac_ip_table()
         self.create_spoof_log_table()
-    
+
     def add_host_entry_to_db(self, mac, ip, spoof_pair=True):
         spoof_val_for_db = bool_to_int(spoof_pair)
-        self.execute_and_commit("INSERT INTO {} VALUES (?,?,?)".format(self.db_hosts), (mac.lower(), ip, spoof_val_for_db))
-        
+        self.execute_and_commit("INSERT INTO {} VALUES (?,?,?)".format(self.db_hosts),
+                                (mac.lower(), ip, spoof_val_for_db))
+
     def log_spoof(self, mac, ip, time_str):
         self.execute_and_commit("INSERT INTO {} VALUES (?,?,?)".format(self.spoof_log), (mac.lower(), ip, time_str))
-    
-    def exists_in_db(self, query, args):
-        self.cur.execute(query, args)
+
+    def exists_in_db(self, *args):
+        self.cur.execute(*args)
         res = self.cur.fetchall()
         if len(res) == 0:
             return False
         return True
-        
+
     # saves transaction to db
     def execute_and_commit(self, *args):
         self.cur.execute(*args)
         self.con.commit()
-    
+
     def ip_exists(self, ip, spoof_ip):
         spoof_val_for_db = bool_to_int(spoof_ip)
-        return self.exists_in_db("SELECT * FROM {} WHERE ip_adrs='?' AND spoof_pair='?'".format(self.db_hosts), (ip, spoof_val_for_db))
-    
+        return self.exists_in_db("SELECT * FROM {} WHERE ip_adrs=? AND spoof_pair=?".format(self.db_hosts),
+                                 (ip, spoof_val_for_db))
+
     def mac_exists(self, mac, spoof_mac=None):
-        if spoof_mac is not None:
+        if spoof_mac:
             spoof_val_for_db = bool_to_int(spoof_mac)
-            return self.exists_in_db("SELECT * FROM {} WHERE mac_adrs='?' AND spoof_pair='?'".format(self.db_hosts), (mac, spoof_val_for_db))
-        return self.exists_in_db("SELECT * FROM {} WHERE mac_adrs='?'".format(self.db_hosts), (mac,))
-        
+            return self.exists_in_db("SELECT * FROM {} WHERE mac_adrs=? AND spoof_pair=?".format(self.db_hosts),
+                                     (mac, spoof_val_for_db))
+        return self.exists_in_db("SELECT * FROM {} WHERE mac_adrs=?".format(self.db_hosts), (mac,))
+
     def mac_ip_pair_exists(self, mac, ip, spoof_pair=None):
-        if spoof_pair is not None:
+        if spoof_pair:
             spoof_val_for_db = bool_to_int(spoof_pair)
-            return self.exists_in_db("SELECT * FROM {} WHERE mac_adrs='?' AND ip_adrs='?' AND spoof_pair='?'".format(self.db_hosts), (mac, ip, spoof_val_for_db))
-        return self.exists_in_db("SELECT * FROM {} WHERE mac_adrs='?' AND ip_adrs='?'".format(self.db_hosts), (mac, ip))
-    
+            return self.exists_in_db(
+                "SELECT * FROM {} WHERE mac_adrs=? AND ip_adrs=? AND spoof_pair=?".format(self.db_hosts),
+                (mac, ip, spoof_val_for_db))
+        return self.exists_in_db("SELECT * FROM {} WHERE mac_adrs=? AND ip_adrs=?".format(self.db_hosts), (mac, ip))
+
     def create_mac_ip_table(self):
         # spoof_pair is 0 (False) or 1 (True)
-        self.execute_and_commit("CREATE TABLE IF NOT EXISTS {} (mac_adrs TEXT, ip_adrs TEXT, spoof_pair INTEGER)".format(self.db_hosts))
-        
+        self.execute_and_commit(
+            "CREATE TABLE IF NOT EXISTS {} (mac_adrs TEXT, ip_adrs TEXT, spoof_pair INTEGER)".format(self.db_hosts))
+
     def create_spoof_log_table(self):
-        self.execute_and_commit("CREATE TABLE IF NOT EXISTS {} (mac_adrs TEXT, ip_adrs TEXT, time TIMESTAMP)".format(self.spoof_log))
-    
+        self.execute_and_commit(
+            "CREATE TABLE IF NOT EXISTS {} (mac_adrs TEXT, ip_adrs TEXT, time TIMESTAMP)".format(self.spoof_log))
+
     def db_table_exists(self, table_name):
-        return self.exists_in_db("SELECT name FROM sqlite_master WHERE type='table' AND name='?'", (table_name,))
-        
+        return self.exists_in_db("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
+
     def drop_table(self, table_name):
         self.execute_and_commit("DROP TABLE IF EXISTS {}".format(table_name))
+
 
 if __name__ == '__main__':
     iface = 'wlan0'
