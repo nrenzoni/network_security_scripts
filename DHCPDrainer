@@ -3,7 +3,6 @@ from argparse import ArgumentParser
 from scapy.all import *
 import threading
 import time
-import ipaddress
 from queue import PriorityQueue
 
 # tested with python3
@@ -184,9 +183,9 @@ def main():
                         help='max number of IPs in DHCP allocation (educated guess)')
     parser.add_argument('-p', '--persist', action='store_true', default=False,
                         help='if flag is specified, will persist DHCP starvation attack until %(prog)s is terminated'
-                             '(False)')
+                             ' (False)')
     parser.add_argument('-n', '--request-threads', default=3,
-                        help='number of threads for sending out DHCP request packets')
+                        help='number of threads for sending out DHCP request (3)')
 
     parsed_args = parser.parse_args()
     iface = parsed_args.iface
