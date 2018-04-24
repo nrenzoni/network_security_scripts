@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 # implementation of arp spoof detection based off paper: https://pdfs.semanticscholar.org/5694/89f513553bd120d8a2831b3bc2e557d6e640.pdf
 # paper by Vivek Ramachandran and Sukumar Nandi
 # this python implementation by Nechemia Renzoni
